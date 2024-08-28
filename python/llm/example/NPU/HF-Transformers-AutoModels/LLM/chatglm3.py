@@ -38,7 +38,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--repo-id-or-model-path",
         type=str,
-        default="baichuan-inc/Baichuan2-7B-Chat",
+        default="D:\SuperBuilder\chatglm3-6b",
         help="The huggingface repo id for the Baichuan2 model to be downloaded"
         ", or the path to the huggingface checkpoint folder",
     )
