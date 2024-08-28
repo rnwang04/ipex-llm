@@ -274,7 +274,7 @@ class FusedChatglmLowBitMultiDecoderlayer(torch.nn.Module):
             start, end = self.layer_ranges[i]
             lm_0 = input_laynorm_weights[start:end]
             lm_1 = post_attn_layernorm_weights[start:end]
-            decoder = LowBitLlamaMultiDecoderlayer(
+            decoder = LowBitChatglmMultiDecoderlayer(
                 [1, 1, num_heads * head_dim],
                 input_layernorm_weights=lm_0,
                 post_attn_layernorm_weights=lm_1,
@@ -294,7 +294,7 @@ class FusedChatglmLowBitMultiDecoderlayer(torch.nn.Module):
 
         for i in range(intra_stages):
             start, end = self.layer_ranges[i]
-            self.backend_decoders[i].set_weights(self.op_id, op_parameters[start * 7:end * 7])
+            self.backend_decoders[i].set_weights(self.op_id, op_parameters[start * 4:end * 4])
 
     def forward(
         self,
@@ -318,7 +318,7 @@ class FusedChatglmLowBitMultiDecoderlayer(torch.nn.Module):
             start, end = self.layer_ranges[i]
             self.backend_decoders[i].update_cache(past_key_value, self.layer_indexes[start:end])
 
-        hidden_states, new_keys, new_values = LowBitLlamaMultiDecoderlayer.run_decoders(
+        hidden_states, new_keys, new_values = LowBitChatglmMultiDecoderlayer.run_decoders(
             inputs,
             decoders=self.backend_decoders)
 
@@ -383,7 +383,7 @@ class FusedChatglmLowBitDecoderlayer(torch.nn.Module):
             np_dtype = np.float16
 
         self.backend_cls_prefill = partial(
-            LowBitLlamaMultiDecoderlayer,
+            LowBitChatglmMultiDecoderlayer,
             num_heads=num_heads,
             num_key_value_heads=num_key_value_heads,
             num_layers=1,
@@ -469,33 +469,29 @@ def run_decode(
     my_size = dist.get_world_size()
     logger.info(f"rank: {my_rank}, size: {my_size}")
 
-    num_heads = model.model.layers[layer_start].self_attn.num_heads
-    num_key_value_heads = model.model.layers[layer_start].self_attn.num_key_value_heads
-    head_dim = model.model.layers[layer_start].self_attn.head_dim
-    rms_norm_eps = model.config.rms_norm_eps
-    intermediate_size = model.config.intermediate_size
+    # num_heads = model.model.layers[layer_start].self_attn.num_heads
+    # num_key_value_heads = model.model.layers[layer_start].self_attn.num_key_value_heads
+    # head_dim = model.model.layers[layer_start].self_attn.head_dim
+    hidden_size = model.config.hidden_size
+    rms_norm_eps = model.config.layernorm_epsilon
+    intermediate_size = model.config.ffn_hidden_size
     deocderlayers = []
     layer_weights = []
     input_layer_norm_weights = []
     post_attn_layernorm_weights = []
     layer_indexs = range(layer_start, layer_end)
     for layer_idx in layer_indexs:
-        curr_layer = model.model.layers[layer_idx]
-        attn_layer = curr_layer.self_attn
+        curr_layer = model.encoder.layers[layer_idx]
+        attn_layer = curr_layer.self_attention
         mlp_layer = curr_layer.mlp
 
         weights = [
-            (attn_layer.q_proj.weight, attn_layer.q_proj.scale),
-            (attn_layer.k_proj.weight, attn_layer.k_proj.scale),
-            (attn_layer.v_proj.weight, attn_layer.v_proj.scale),
-            (attn_layer.o_proj.weight, attn_layer.o_proj.scale),
-            (mlp_layer.gate_proj.weight, mlp_layer.gate_proj.scale),
-            (mlp_layer.up_proj.weight, mlp_layer.up_proj.scale),
-            (mlp_layer.down_proj.weight, mlp_layer.down_proj.scale),
+            (attn_layer.query_key_value.weight, attn_layer.query_key_value.scale),
+            (attn_layer.dense.weight, attn_layer.dense.scale),
+            (mlp_layer.dense_h_to_4h.weight, mlp_layer.dense_h_to_4h.scale),
+            (mlp_layer.dense_4h_to_h.weight, mlp_layer.dense_4h_to_h.scale),
         ]
 
-        cached_cos = curr_layer.self_attn.rotary_emb.cos_cached.to(torch.float16)
-        cached_sin = curr_layer.self_attn.rotary_emb.sin_cached.to(torch.float16)
         layer_norm_0 = curr_layer.input_layernorm.weight.to(torch.float16)
         layer_norm_1 = curr_layer.post_attention_layernorm.weight.to(torch.float16)
 
@@ -509,11 +505,10 @@ def run_decode(
         post_attn_layernorm_weights=post_attn_layernorm_weights,
         layer_indexes=layer_indexs,
         intra_stages=intra_stages,
-        cached_cos=cached_cos,
-        cached_sin=cached_sin,
-        num_heads=num_heads,
-        head_dim=head_dim,
-        num_key_value_heads=num_key_value_heads,
+        # num_heads=num_heads,
+        # head_dim=head_dim,
+        # num_key_value_heads=num_key_value_heads,
+        hidden_size=hidden_size,
         rms_norm_eps=rms_norm_eps,
         intermediate_size=intermediate_size,
         max_seq_len=max_seq_len,
@@ -526,7 +521,7 @@ def run_decode(
     past_key_values = None
 
     control = torch.empty((), dtype=torch.int)
-    hidden_states = torch.empty((1, 1, head_dim * num_heads), dtype=torch.float16)
+    hidden_states = torch.empty((1, 1, hidden_size), dtype=torch.float16)
     with torch.inference_mode():
         while True:
 
@@ -583,7 +578,7 @@ class DecodeRunner:
         self.transpose_value_cache = transpose_value_cache
         world_size = inter_pp + 1
         intra_stages = intra_pp
-        num_layers = self.model.model.config.num_hidden_layers
+        num_layers = self.model.config.num_layers
 
         port = "54791"
         os.environ["MASTER_ADDR"] = "127.0.0.1"
@@ -709,10 +704,10 @@ def run_prefill(
 
         new_decoderlayer = FusedChatglmLowBitDecoderlayer(
             weights,
-            num_heads=num_heads,
-            num_key_value_heads=num_key_value_heads,
-            cached_cos=cached_cos,
-            cached_sin=cached_sin,
+            # num_heads=num_heads,
+            # num_key_value_heads=num_key_value_heads,
+            # cached_cos=cached_cos,
+            # cached_sin=cached_sin,
             layer_norm_0=layer_norm_0,
             layer_norm_1=layer_norm_1,
             layer_idx=layer_idx,
@@ -833,15 +828,15 @@ def gen_chatglm_fused_model_forward(prefill_runner, decode_runner):
 
     def chatglm_fused_model_forward(
         self,
-            input_ids,
-            position_ids: Optional[torch.Tensor] = None,
-            attention_mask: Optional[torch.BoolTensor] = None,
-            full_attention_mask: Optional[torch.BoolTensor] = None,
-            past_key_values: Optional[Tuple[Tuple[torch.Tensor, torch.Tensor], ...]] = None,
-            inputs_embeds: Optional[torch.Tensor] = None,
-            use_cache: Optional[bool] = None,
-            output_hidden_states: Optional[bool] = None,
-            return_dict: Optional[bool] = None,
+        input_ids,
+        position_ids: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.BoolTensor] = None,
+        full_attention_mask: Optional[torch.BoolTensor] = None,
+        past_key_values: Optional[Tuple[Tuple[torch.Tensor, torch.Tensor], ...]] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+        use_cache: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
     ):
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
@@ -880,7 +875,7 @@ def gen_chatglm_fused_model_forward(prefill_runner, decode_runner):
 
         # decoder layers
         all_hidden_states = () if output_hidden_states else None
-        all_self_attentions = () if output_attentions else None
+        all_self_attentions = None
         next_decoder_cache = None
 
         seq_len = hidden_states.size(1)
@@ -905,11 +900,11 @@ def gen_chatglm_fused_model_forward(prefill_runner, decode_runner):
         # ipex-llm changes end
 
         if not return_dict:
-            return tuple(v for v in [hidden_states, presents, all_hidden_states, all_self_attentions] if v is not None)
+            return tuple(v for v in [hidden_states, next_cache, all_hidden_states, all_self_attentions] if v is not None)
 
         return BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
-            past_key_values=presents,
+            past_key_values=next_cache,
             hidden_states=all_hidden_states,
             attentions=all_self_attentions,
         )
@@ -918,6 +913,7 @@ def gen_chatglm_fused_model_forward(prefill_runner, decode_runner):
 
 
 def chatglm_condition_forward(
+    self,
     input_ids: Optional[torch.Tensor] = None,
     position_ids: Optional[torch.Tensor] = None,
     attention_mask: Optional[torch.Tensor] = None,
