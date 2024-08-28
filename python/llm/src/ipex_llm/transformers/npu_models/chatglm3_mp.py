@@ -44,7 +44,7 @@ from transformers.modeling_outputs import CausalLMOutputWithPast
 from torch.nn import CrossEntropyLoss
 
 
-class LowBitLlamaMultiDecoderlayer(LLMBaseNNFactory):
+class LowBitChatglmMultiDecoderlayer(LLMBaseNNFactory):
     def __init__(
         self,
         # batch_size: int,
@@ -219,7 +219,7 @@ class LowBitLlamaMultiDecoderlayer(LLMBaseNNFactory):
         return hidden_states, new_key_states, new_value_states
 
 
-class FusedLlamaLowBitMultiDecoderlayer(torch.nn.Module):
+class FusedChatglmLowBitMultiDecoderlayer(torch.nn.Module):
 
     def __init__(
         self,
@@ -352,8 +352,8 @@ class FusedLlamaLowBitMultiDecoderlayer(torch.nn.Module):
             self.backend_decoders[i].load_cache_async()
 
 
-class FusedLlamaLowBitDecoderlayer(torch.nn.Module):
-    """LLAMA MLP operation NPU backend."""
+class FusedChatglmLowBitDecoderlayer(torch.nn.Module):
+    """Chatglm operation NPU backend."""
 
     def __init__(
         self,
@@ -503,7 +503,7 @@ def run_decode(
         input_layer_norm_weights.append(layer_norm_0)
         post_attn_layernorm_weights.append(layer_norm_1)
 
-    multi_decoder = FusedLlamaLowBitMultiDecoderlayer(
+    multi_decoder = FusedChatglmLowBitMultiDecoderlayer(
         parameters=layer_weights,
         input_laynorm_weights=input_layer_norm_weights,
         post_attn_layernorm_weights=post_attn_layernorm_weights,
@@ -678,30 +678,27 @@ def run_prefill(
 ):
 
     layer_start = 0
-    layer_end = len(model.model.layers)
-    num_heads = model.model.layers[layer_start].self_attn.num_heads
-    num_key_value_heads = model.model.layers[layer_start].self_attn.num_key_value_heads
-    head_dim = model.model.layers[layer_start].self_attn.head_dim
-    rms_norm_eps = model.config.rms_norm_eps
-    intermediate_size = model.config.intermediate_size
+    layer_end = len(model.encoder.layers)
+    # num_heads = model.encoder.layers[layer_start].self_attention.num_heads
+    # num_key_value_heads = model.encoder.layers[layer_start].self_attention.num_key_value_heads
+    # head_dim = model.model.layers[layer_start].self_attn.head_dim
+    rms_norm_eps = model.config.layernorm_epsilon
+    intermediate_size = model.config.ffn_hidden_size
     deocderlayers = []
     layer_weights = []
     input_layer_norm_weights = []
     post_attn_layernorm_weights = []
     layer_indexs = range(layer_start, layer_end)
     for layer_idx in layer_indexs:
-        curr_layer = model.model.layers[layer_idx]
-        attn_layer = curr_layer.self_attn
+        curr_layer = model.encoder.layers[layer_idx]
+        attn_layer = curr_layer.self_attention
         mlp_layer = curr_layer.mlp
 
         weights = [
-            (attn_layer.q_proj.weight, attn_layer.q_proj.scale),
-            (attn_layer.k_proj.weight, attn_layer.k_proj.scale),
-            (attn_layer.v_proj.weight, attn_layer.v_proj.scale),
-            (attn_layer.o_proj.weight, attn_layer.o_proj.scale),
-            (mlp_layer.gate_proj.weight, mlp_layer.gate_proj.scale),
-            (mlp_layer.up_proj.weight, mlp_layer.up_proj.scale),
-            (mlp_layer.down_proj.weight, mlp_layer.down_proj.scale),
+            (attn_layer.query_key_value.weight, attn_layer.query_key_value.scale),
+            (attn_layer.dense.weight, attn_layer.dense.scale),
+            (mlp_layer.dense_h_to_4h.weight, mlp_layer.dense_h_to_4h.scale),
+            (mlp_layer.dense_4h_to_h.weight, mlp_layer.dense_4h_to_h.scale),
         ]
 
         cached_cos = curr_layer.self_attn.rotary_emb.cos_cached.to(torch.float16)
@@ -710,7 +707,7 @@ def run_prefill(
         layer_norm_0 = curr_layer.input_layernorm.weight.to(torch.float16)
         layer_norm_1 = curr_layer.post_attention_layernorm.weight.to(torch.float16)
 
-        new_decoderlayer = FusedLlamaLowBitDecoderlayer(
+        new_decoderlayer = FusedChatglmLowBitDecoderlayer(
             weights,
             num_heads=num_heads,
             num_key_value_heads=num_key_value_heads,
@@ -728,7 +725,7 @@ def run_prefill(
         layer_weights.extend(weights)
         input_layer_norm_weights.append(layer_norm_0)
         post_attn_layernorm_weights.append(layer_norm_1)
-        model.model.layers[layer_idx] = new_decoderlayer
+        model.encoder.layers[layer_idx] = new_decoderlayer
         deocderlayers.append(new_decoderlayer)
 
     print("finish creating all decode layers in prefill")
@@ -807,14 +804,15 @@ class PrefillRunner:
         )
         pad_len = self.max_prompt_len - seq_len
         hidden_states = F.pad(hidden_states.to(torch.float16), (0, 0, 0, pad_len), value=0.0)
-        position_ids = F.pad(position_ids, (0, pad_len), value=0)
-        attention_mask = F.pad(
-            attention_mask.to(torch.float16),
-            (0, pad_len, 0, pad_len),
-            value=torch.finfo(torch.float16).min,
-        )
+        # position_ids = F.pad(position_ids, (0, pad_len), value=0)
+        # attention_mask = F.pad(
+        #     attention_mask.to(torch.float16),
+        #     (0, pad_len, 0, pad_len),
+        #     value=torch.finfo(torch.float16).min,
+        # )
 
-        args = (hidden_states, position_ids, attention_mask, past_key_value, cache_position)
+        # args = (hidden_states, position_ids, attention_mask, past_key_value, cache_position)
+        args = (hidden_states, full_attention_mask, rotary_pos_emb, past_key_values, use_cache, output_hidden_states)
         self.prefill_input_queue.put(args)
         hidden_states, past_key_value = self.prefill_result_queue.get()
         past_key_value.shrink(seq_len, self.transpose_value_cache)
@@ -835,72 +833,54 @@ def gen_chatglm_fused_model_forward(prefill_runner, decode_runner):
 
     def chatglm_fused_model_forward(
         self,
-        input_ids: torch.LongTensor = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[List[torch.FloatTensor]] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        use_cache: Optional[bool] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
-        cache_position: Optional[torch.LongTensor] = None,
-    ) -> Union[Tuple, BaseModelOutputWithPast]:
-        t0 = time.perf_counter()
-        output_attentions = (
-            output_attentions if output_attentions is not None else self.config.output_attentions
-        )
+            input_ids,
+            position_ids: Optional[torch.Tensor] = None,
+            attention_mask: Optional[torch.BoolTensor] = None,
+            full_attention_mask: Optional[torch.BoolTensor] = None,
+            past_key_values: Optional[Tuple[Tuple[torch.Tensor, torch.Tensor], ...]] = None,
+            inputs_embeds: Optional[torch.Tensor] = None,
+            use_cache: Optional[bool] = None,
+            output_hidden_states: Optional[bool] = None,
+            return_dict: Optional[bool] = None,
+    ):
         output_hidden_states = (
-            output_hidden_states
-            if output_hidden_states is not None
-            else self.config.output_hidden_states
+            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
         use_cache = use_cache if use_cache is not None else self.config.use_cache
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
-        if (input_ids is None) ^ (inputs_embeds is not None):
-            msg = (
-                "You cannot specify both input_ids and inputs_embeds at the same time,"
-                " and must specify either one"
-            )
-            invalidInputError(False, msg)
-
-        if self.gradient_checkpointing and self.training and use_cache:
-            use_cache = False
+        batch_size, seq_length = input_ids.shape
 
         if inputs_embeds is None:
-            inputs_embeds = self.embed_tokens(input_ids)
+            inputs_embeds = self.embedding(input_ids)
 
-        past_seen_tokens = 0
+        if self.pre_seq_len is not None:
+            if past_key_values is None:
+                past_key_values = self.get_prompt(batch_size=batch_size, device=input_ids.device,
+                                                  dtype=inputs_embeds.dtype)
+            if attention_mask is not None:
+                attention_mask = torch.cat([attention_mask.new_ones((batch_size, self.pre_seq_len)),
+                                            attention_mask], dim=-1)
+
+        if full_attention_mask is None:
+            if (attention_mask is not None and not attention_mask.all()) or (past_key_values and seq_length != 1):
+                full_attention_mask = self.get_masks(input_ids, past_key_values, padding_mask=attention_mask)
+
+        # Rotary positional embeddings
+        rotary_pos_emb = self.rotary_pos_emb(self.seq_length)
+        if position_ids is not None:
+            rotary_pos_emb = rotary_pos_emb[position_ids]
+        else:
+            rotary_pos_emb = rotary_pos_emb[None, :seq_length]
+        rotary_pos_emb = rotary_pos_emb.transpose(0, 1).contiguous()
 
         # ipex-llm changes start
-        from ipex_llm.transformers.npu_models.kv import DynamicFusedNormalCache
-
-        if use_cache and not isinstance(past_key_values, DynamicFusedNormalCache):
-            past_key_values = DynamicFusedNormalCache.from_legacy_cache(past_key_values)
-            past_seen_tokens = past_key_values.get_seq_length()
-
-        if cache_position is None:
-            cache_position = torch.arange(
-                past_seen_tokens,
-                past_seen_tokens + inputs_embeds.shape[1],
-                device=inputs_embeds.device,
-            )
-        # ipex-llm changes end
-
-        if position_ids is None:
-            position_ids = cache_position.unsqueeze(0)
-
-        causal_mask = self._update_causal_mask(
-            attention_mask, inputs_embeds, cache_position, past_seen_tokens
-        )
-
         # embed positions
         hidden_states = inputs_embeds
 
         # decoder layers
         all_hidden_states = () if output_hidden_states else None
-        all_self_attns = () if output_attentions else None
+        all_self_attentions = () if output_attentions else None
         next_decoder_cache = None
 
         seq_len = hidden_states.size(1)
@@ -910,116 +890,88 @@ def gen_chatglm_fused_model_forward(prefill_runner, decode_runner):
         else:
             layers_runner = prefill_runner
         layer_outputs = layers_runner.forward(
-            hidden_states,
-            attention_mask=causal_mask,
-            position_ids=position_ids,
-            past_key_value=past_key_values,
-            output_attentions=output_attentions,
+            hidden_states=hidden_states,
+            attention_mask=full_attention_mask,
+            rotary_pos_emb=rotary_pos_emb,
+            kv_caches=past_key_values,
             use_cache=use_cache,
-            cache_position=cache_position,
+            output_hidden_states=output_hidden_states
         )
+        
         hidden_states = layer_outputs[0]
-
         next_decoder_cache = layer_outputs[1]
 
-        hidden_states = self.norm(hidden_states)
-
-        # add hidden states from the last decoder layer
-        if output_hidden_states:
-            all_hidden_states += (hidden_states,)
-
-        # ipex-llm changes start
         next_cache = next_decoder_cache if use_cache else None
         # ipex-llm changes end
+
         if not return_dict:
-            return tuple(
-                v
-                for v in [hidden_states, next_cache, all_hidden_states, all_self_attns]
-                if v is not None
-            )
-        t1 = time.perf_counter()
-        # print("fused model forward time: ", t1 - t0)
+            return tuple(v for v in [hidden_states, presents, all_hidden_states, all_self_attentions] if v is not None)
+
         return BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
-            past_key_values=next_cache,
+            past_key_values=presents,
             hidden_states=all_hidden_states,
-            attentions=all_self_attns,
+            attentions=all_self_attentions,
         )
 
     return chatglm_fused_model_forward
 
 
 def chatglm_condition_forward(
-    self,
-    input_ids: torch.LongTensor = None,
+    input_ids: Optional[torch.Tensor] = None,
+    position_ids: Optional[torch.Tensor] = None,
     attention_mask: Optional[torch.Tensor] = None,
-    position_ids: Optional[torch.LongTensor] = None,
-    past_key_values: Optional[List[torch.FloatTensor]] = None,
-    inputs_embeds: Optional[torch.FloatTensor] = None,
-    labels: Optional[torch.LongTensor] = None,
+    past_key_values: Optional[Tuple[torch.FloatTensor]] = None,
+    inputs_embeds: Optional[torch.Tensor] = None,
+    labels: Optional[torch.Tensor] = None,
     use_cache: Optional[bool] = None,
     output_attentions: Optional[bool] = None,
     output_hidden_states: Optional[bool] = None,
     return_dict: Optional[bool] = None,
-    cache_position: Optional[torch.LongTensor] = None,
-) -> Union[Tuple, CausalLMOutputWithPast]:
-    output_attentions = output_attentions if output_attentions is not None \
-        else self.config.output_attentions
-    output_hidden_states = (
-        output_hidden_states if output_hidden_states is not None
-        else self.config.output_hidden_states
-    )
+    return_last_logit: Optional[bool] = False,
+):
+    use_cache = use_cache if use_cache is not None else self.config.use_cache
     return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
-    # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
-    outputs = self.model(
+    transformer_outputs = self.transformer(
         input_ids=input_ids,
-        attention_mask=attention_mask,
         position_ids=position_ids,
+        attention_mask=attention_mask,
         past_key_values=past_key_values,
         inputs_embeds=inputs_embeds,
         use_cache=use_cache,
-        output_attentions=output_attentions,
         output_hidden_states=output_hidden_states,
         return_dict=return_dict,
-        cache_position=cache_position,
     )
 
-    hidden_states = outputs[0]
-    # ipex-llm change start
-    hidden_states = reshape_lm_head_input(hidden_states)
-    # ipex-llm change end
-    if self.config.pretraining_tp > 1:
-        lm_head_slices = self.lm_head.weight.split(self.vocab_size // self.config.pretraining_tp,
-                                                   dim=0)
-        logits = [F.linear(hidden_states, lm_head_slices[i])
-                  for i in range(self.config.pretraining_tp)]
-        logits = torch.cat(logits, dim=-1)
-    else:
-        logits = self.lm_head(hidden_states)
-    logits = logits.float()
+    hidden_states = transformer_outputs[0]
+    if return_last_logit:
+        hidden_states = hidden_states[-1:]
+    lm_logits = self.transformer.output_layer(hidden_states)
+    lm_logits = lm_logits.transpose(0, 1).contiguous()
 
     loss = None
     if labels is not None:
+        lm_logits = lm_logits.to(torch.float32)
+
         # Shift so that tokens < n predict n
-        shift_logits = logits[..., :-1, :].contiguous()
+        shift_logits = lm_logits[..., :-1, :].contiguous()
         shift_labels = labels[..., 1:].contiguous()
         # Flatten the tokens
-        loss_fct = CrossEntropyLoss()
-        shift_logits = shift_logits.view(-1, self.config.vocab_size)
-        shift_labels = shift_labels.view(-1)
-        # Enable model parallelism
-        shift_labels = shift_labels.to(shift_logits.device)
-        loss = loss_fct(shift_logits, shift_labels)
+        loss_fct = CrossEntropyLoss(ignore_index=-100)
+        loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+
+        lm_logits = lm_logits.to(hidden_states.dtype)
+        loss = loss.to(hidden_states.dtype)
 
     if not return_dict:
-        output = (logits,) + outputs[1:]
-        return (loss,) + output if loss is not None else output
+        output = (lm_logits,) + transformer_outputs[1:]
+        return ((loss,) + output) if loss is not None else output
 
     return CausalLMOutputWithPast(
         loss=loss,
-        logits=logits,
-        past_key_values=outputs.past_key_values,
-        hidden_states=outputs.hidden_states,
-        attentions=outputs.attentions,
+        logits=lm_logits,
+        past_key_values=transformer_outputs.past_key_values,
+        hidden_states=transformer_outputs.hidden_states,
+        attentions=transformer_outputs.attentions,
     )
