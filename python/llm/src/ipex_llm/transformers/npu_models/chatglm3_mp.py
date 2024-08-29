@@ -488,7 +488,8 @@ def run_decode(
         weights = [
             (attn_layer.query_key_value.weight, attn_layer.query_key_value.scale),
             (attn_layer.dense.weight, attn_layer.dense.scale),
-            (mlp_layer.dense_h_to_4h.weight, mlp_layer.dense_h_to_4h.scale),
+            (mlp_layer.gate_proj.weight, mlp_layer.gate_proj.scale),
+            (mlp_layer.up_proj.weight, mlp_layer.up_proj.scale),
             (mlp_layer.dense_4h_to_h.weight, mlp_layer.dense_4h_to_h.scale),
         ]
 
@@ -692,7 +693,8 @@ def run_prefill(
         weights = [
             (attn_layer.query_key_value.weight, attn_layer.query_key_value.scale),
             (attn_layer.dense.weight, attn_layer.dense.scale),
-            (mlp_layer.dense_h_to_4h.weight, mlp_layer.dense_h_to_4h.scale),
+            (mlp_layer.gate_proj.weight, mlp_layer.gate_proj.scale),
+            (mlp_layer.up_proj.weight, mlp_layer.up_proj.scale),
             (mlp_layer.dense_4h_to_h.weight, mlp_layer.dense_4h_to_h.scale),
         ]
 

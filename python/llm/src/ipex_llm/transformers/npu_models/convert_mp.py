@@ -41,6 +41,32 @@ def optimize_llm_pre(model: torch.nn.Module, qtype):
         if model.config.hidden_size in [4096, 2048]:
             from ipex_llm.transformers.models.baichuan import pre_compute_inv_freq
             model.apply(pre_compute_inv_freq)
+    if model.config.architectures is not None \
+       and model.config.architectures[0] in ["ChatGLMModel", "ChatGLMForConditionalGeneration"] and \
+       hasattr(model.config, 'padded_vocab_size') and \
+       model.config.padded_vocab_size == 65024:
+        # chatglm3-6b
+        def split_mlp_proj_func(module):
+            if "MLP" in module.__class__.__name__:
+                dense_h_to_4h = module.dense_h_to_4h
+                print(dense_h_to_4h.bias)
+                in_features = dense_h_to_4h.weight.data.shape[1]
+                output_features = dense_h_to_4h.weight.data.shape[0] // 2
+                gate_proj = torch.nn.Linear(0, 0, False)
+                gate_proj.weight = torch.nn.Parameter(dense_h_to_4h.weight.data[:output_features, :], requires_grad=False)
+                gate_proj.in_features = in_features
+                gate_proj.out_features = output_features
+                module.gate_proj = gate_proj
+
+                up_proj = torch.nn.Linear(0, 0, False)
+                up_proj.weight = torch.nn.Parameter(dense_h_to_4h.weight.data[output_features:, :], requires_grad=False)
+                up_proj.in_features = in_features
+                up_proj.out_features = output_features
+                module.up_proj = up_proj
+
+                del module.dense_h_to_4h
+                del module.swiglu
+        model.apply(split_mlp_proj_func)
 
     # MiniCPM-V 2.6 and minicpm-2b must put lm_head on CPU now
     cpu_lm_head = (
