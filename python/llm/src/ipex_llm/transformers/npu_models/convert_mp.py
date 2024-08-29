@@ -49,7 +49,6 @@ def optimize_llm_pre(model: torch.nn.Module, qtype):
         def split_mlp_proj_func(module):
             if "MLP" in module.__class__.__name__:
                 dense_h_to_4h = module.dense_h_to_4h
-                print(dense_h_to_4h.bias)
                 in_features = dense_h_to_4h.weight.data.shape[1]
                 output_features = dense_h_to_4h.weight.data.shape[0] // 2
                 gate_proj = torch.nn.Linear(0, 0, False)
@@ -65,7 +64,7 @@ def optimize_llm_pre(model: torch.nn.Module, qtype):
                 module.up_proj = up_proj
 
                 del module.dense_h_to_4h
-                del module.swiglu
+                del module.activation_func
         model.apply(split_mlp_proj_func)
 
     # MiniCPM-V 2.6 and minicpm-2b must put lm_head on CPU now

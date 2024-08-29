@@ -481,7 +481,7 @@ def run_decode(
     post_attn_layernorm_weights = []
     layer_indexs = range(layer_start, layer_end)
     for layer_idx in layer_indexs:
-        curr_layer = model.encoder.layers[layer_idx]
+        curr_layer = model.transformer.encoder.layers[layer_idx]
         attn_layer = curr_layer.self_attention
         mlp_layer = curr_layer.mlp
 
@@ -674,7 +674,7 @@ def run_prefill(
 ):
 
     layer_start = 0
-    layer_end = len(model.encoder.layers)
+    layer_end = len(model.transformer.encoder.layers)
     # num_heads = model.encoder.layers[layer_start].self_attention.num_heads
     # num_key_value_heads = model.encoder.layers[layer_start].self_attention.num_key_value_heads
     # head_dim = model.model.layers[layer_start].self_attn.head_dim
@@ -686,7 +686,7 @@ def run_prefill(
     post_attn_layernorm_weights = []
     layer_indexs = range(layer_start, layer_end)
     for layer_idx in layer_indexs:
-        curr_layer = model.encoder.layers[layer_idx]
+        curr_layer = model.transformer.encoder.layers[layer_idx]
         attn_layer = curr_layer.self_attention
         mlp_layer = curr_layer.mlp
 
@@ -722,7 +722,7 @@ def run_prefill(
         layer_weights.extend(weights)
         input_layer_norm_weights.append(layer_norm_0)
         post_attn_layernorm_weights.append(layer_norm_1)
-        model.encoder.layers[layer_idx] = new_decoderlayer
+        model.transformer.encoder.layers[layer_idx] = new_decoderlayer
         deocderlayers.append(new_decoderlayer)
 
     print("finish creating all decode layers in prefill")
