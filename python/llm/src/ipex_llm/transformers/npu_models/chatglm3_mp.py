@@ -509,7 +509,6 @@ def run_decode(
         num_heads=num_heads,
         head_dim=head_dim,
         num_key_value_heads=num_key_value_heads,
-        hidden_size=hidden_size,
         rms_norm_eps=rms_norm_eps,
         intermediate_size=intermediate_size,
         max_seq_len=max_seq_len,
