@@ -469,9 +469,9 @@ def run_decode(
     my_size = dist.get_world_size()
     logger.info(f"rank: {my_rank}, size: {my_size}")
 
-    # num_heads = model.model.layers[layer_start].self_attn.num_heads
-    # num_key_value_heads = model.model.layers[layer_start].self_attn.num_key_value_heads
-    # head_dim = model.model.layers[layer_start].self_attn.head_dim
+    num_heads = model.config.num_attention_heads
+    num_key_value_heads = model.config.multi_query_group_num
+    head_dim = model.config.hidden_size // model.config.num_attention_heads
     hidden_size = model.config.hidden_size
     rms_norm_eps = model.config.layernorm_epsilon
     intermediate_size = model.config.ffn_hidden_size
@@ -506,9 +506,9 @@ def run_decode(
         post_attn_layernorm_weights=post_attn_layernorm_weights,
         layer_indexes=layer_indexs,
         intra_stages=intra_stages,
-        # num_heads=num_heads,
-        # head_dim=head_dim,
-        # num_key_value_heads=num_key_value_heads,
+        num_heads=num_heads,
+        head_dim=head_dim,
+        num_key_value_heads=num_key_value_heads,
         hidden_size=hidden_size,
         rms_norm_eps=rms_norm_eps,
         intermediate_size=intermediate_size,
