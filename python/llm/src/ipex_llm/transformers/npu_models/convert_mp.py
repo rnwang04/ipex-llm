@@ -115,12 +115,14 @@ def optimize_llm(
             intra_pp=intra_pp,
             transpose_value_cache=transpose_value_cache,
         )
+        print("[debug] init decode_runner")
         prefill_runner = PrefillRunner(
             model,
             max_output_len=max_output_len,
             max_prompt_len=max_prompt_len,
             transpose_value_cache=transpose_value_cache,
         )
+        print("[debug] init prefill_runner")
         llama_model_forward = gen_llama_fused_model_forward(
             prefill_runner=prefill_runner, decode_runner=decode_runner
         )

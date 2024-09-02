@@ -464,7 +464,9 @@ def run_decode(
 
     print("start init process group, rank: ", rank, "world_size: ", world_size)
 
-    dist.init_process_group()
+    if not dist.is_initialized():
+        dist.init_process_group()
+
     my_rank = dist.get_rank()
     my_size = dist.get_world_size()
     logger.info(f"rank: {my_rank}, size: {my_size}")
@@ -520,8 +522,9 @@ def run_decode(
         transpose_value=transpose_value_cache,
         do_print=False,
     )
-
+    print("[debug] run_decode, before dist.barrier()")
     dist.barrier()
+    print("[debug] run_decode, after dist.barrier()")
 
     past_key_values = None
 
@@ -624,7 +627,9 @@ class DecodeRunner:
             self.output_queues.append(output_q)
             self.decoder_processes.append(p)
 
-        dist.init_process_group()
+        if not dist.is_initialized():
+            dist.init_process_group()
+
         my_rank = dist.get_rank()
         self.world_size = dist.get_world_size()
         logger.info(f"rank: {my_rank}, size: {self.world_size}")

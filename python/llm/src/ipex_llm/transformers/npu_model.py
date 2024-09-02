@@ -174,6 +174,7 @@ class _BaseAutoModelClass:
                 intra_pp=intra_pp,
                 transpose_value_cache=transpose_value_cache,
             )
+            model.save_low_bit = types.MethodType(save_low_bit, model)
         else:
             from ipex_llm.transformers.npu_models.convert import optimize_llm
             optimize_llm(model)
@@ -201,18 +202,22 @@ class _BaseAutoModelClass:
     @classmethod
     @patch("transformers.dynamic_module_utils.get_imports", patch_flash_attn_import)
     def load_low_bit(cls, pretrained_model_name_or_path: str, *model_args, **kwargs):
-        if kwargs.pop("torch_dtype", None) not in [None, "auto", torch.float]:
-            warnings.warn("`torch_dtype` will be ignored, `torch.float` will be used")
-
         # ignore following arguments
         ignore_argument(kwargs, "model_hub")
         ignore_argument(kwargs, "lightweight_bmm")
         ignore_argument(kwargs, "cpu_embedding")
         ignore_argument(kwargs, "embedding_qtype")
-        ignore_argument(kwargs, "optimize_model")
-        ignore_argument(kwargs, "modules_to_not_convert")
         ignore_argument(kwargs, "speculative")
         ignore_argument(kwargs, "pipeline_parallel_stages")
+        optimize_model = kwargs.pop("optimize_model", False)
+        max_output_len = kwargs.pop("max_output_len", 1024)
+        max_prompt_len = kwargs.pop("max_prompt_len", 512)
+        inter_pp = kwargs.pop("inter_pp", None)
+        intra_pp = kwargs.pop("intra_pp", None)
+        transpose_value_cache = kwargs.pop("transpose_value_cache", True)
+        modules_to_not_convert = kwargs.pop("modules_to_not_convert", [])
+
+        print("[debug] enter load_low_bit")
 
         from transformers.models.auto.configuration_auto import AutoConfig
         from transformers.modeling_utils import no_init_weights, get_state_dict_dtype
@@ -256,6 +261,8 @@ class _BaseAutoModelClass:
         qtype = config_dict.pop("bigdl_transformers_low_bit", False)
         bigdl_lcmu_enabled = config_dict.pop("bigdl_lcmu_enabled", True)
 
+        print("[debug] bigdl_lcmu_enabled is ", bigdl_lcmu_enabled)
+
         invalidInputError(
             qtype,
             "Detect this model is not a low-bit model, Please use from_pretrained"
@@ -286,6 +293,8 @@ class _BaseAutoModelClass:
         elif type(config) in cls.HF_Model._model_mapping.keys():
             model_class = _get_model_class(config, cls.HF_Model._model_mapping)
 
+        print("[debug] before extract_local_archive_file")
+
         resolved_archive_file, is_sharded = extract_local_archive_file(
             pretrained_model_name_or_path, subfolder, variant
         )
@@ -294,6 +303,8 @@ class _BaseAutoModelClass:
             resolved_archive_file, sharded_metadata = get_local_shard_files(
                 pretrained_model_name_or_path, resolved_archive_file, subfolder=subfolder
             )
+
+        print("[debug] after extract_local_archive_file")
 
         # set dtype to instantiate the model under:
         # 1. If torch_dtype is not None, we use that dtype
@@ -328,6 +339,8 @@ class _BaseAutoModelClass:
         _fast_init = kwargs.pop("_fast_init", True)
         init_contexts = [no_init_weights(_enable=_fast_init)]
         init_contexts.append(init_empty_weights())
+        
+        print("[debug] enter init model")
 
         if bigdl_lcmu_enabled:
             with ContextManagers(init_contexts):
@@ -346,17 +359,44 @@ class _BaseAutoModelClass:
         else:
             model = model_class(config, *model_args, **kwargs)
 
+        print("[debug] finish model = model_class")
+
         # Loading args may differ based on their usage
         quant_device = "meta" if bigdl_lcmu_enabled else "cpu"
+        print("[debug] quant_device is ", quant_device)
         logger.info(f"Converting model, it may takes up to several minutes ...")
         from intel_npu_acceleration_library.compiler import create_npu_kernels
 
-        with torch.no_grad():
-            optimize_llm(model)
-            cls.load_convert(qtype, model, quant_device, *model_args, **kwargs)
-            create_npu_kernels(model)
+        if optimize_model:
+            invalidInputError(
+                max_prompt_len < max_output_len,
+                (
+                    f"max_prompt_len ({max_prompt_len}) should be less"
+                    " than max_output_len ({max_output_len})"
+                ),
+            )
+            from ipex_llm.transformers.npu_models.convert_mp import optimize_llm_pre
 
-        model = model.eval()
+            if hasattr(model, "llm"):
+                llm = model.llm
+            else:
+                llm = model
+            print("before optimize")
+            with torch.no_grad():
+                optimize_llm_pre(model, qtype)
+                print("[debug] finish optimize_llm_pre")
+                cls.load_convert(qtype, model, quant_device, modules_to_not_convert, *model_args, **kwargs)
+                print("[debug] finish load_convert")
+                create_npu_kernels(llm)
+                print("[debug] finish create_npu_kernels")
+            logger.info(f"Finish to convert model")
+
+        else:
+            from ipex_llm.transformers.npu_models.convert import optimize_llm
+            optimize_llm(model)
+            with torch.no_grad():
+                cls.load_convert(qtype, model, quant_device, modules_to_not_convert, *model_args, **kwargs)
+                create_npu_kernels(model)
 
         if is_sharded:
             loaded_state_dict_keys = sharded_metadata["all_checkpoint_keys"]
@@ -414,6 +454,18 @@ class _BaseAutoModelClass:
                 pass
         for param in model.parameters():
             param.requires_grad_(False)
+
+        if optimize_model:
+            from ipex_llm.transformers.npu_models.convert_mp import optimize_llm
+            optimize_llm(
+                llm,
+                max_output_len=max_output_len,
+                max_prompt_len=max_prompt_len,
+                inter_pp=inter_pp,
+                intra_pp=intra_pp,
+                transpose_value_cache=transpose_value_cache,
+            )
+            print("finish optimize_llm")
 
         return model
 
