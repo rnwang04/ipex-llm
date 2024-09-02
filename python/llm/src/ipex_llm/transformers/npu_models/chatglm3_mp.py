@@ -78,12 +78,12 @@ class LowBitChatglmMultiDecoderlayer(LLMBaseNNFactory):
         self.dtype = dtype
         self.cached_cos = cached_cos
         self.cached_sin = cached_sin
-        self.batch_size, self.seq_len, self.hidden_size = hidden_shape
+        self.seq_len, self.batch_size, self.hidden_size = hidden_shape
         self.mode = mode
         self.rms_norm_eps = rms_norm_eps
         self.transpose_value = transpose_value
         self.num_layers = num_layers
-
+        # TODO: make sure?
         cos = self.constant(self.cached_cos)
         self.cos = self.unsqueeze(cos, axis=0)
 
@@ -102,9 +102,10 @@ class LowBitChatglmMultiDecoderlayer(LLMBaseNNFactory):
         self.num_key_value_groups = self.num_heads // self.num_key_value_heads
 
         # define input, the order self.parameter matters
-        input = self.create_input_op((self.batch_size, self.seq_len, self.hidden_size))
+        input = self.create_input_op((self.seq_len, self.batch_size, self.hidden_size))
 
         # Self Attention
+        # TODO: make sure?
         if mode == "decode":
             attention_mask = self.create_input_op((self.batch_size, 1, 1, self.max_seq_len + 1))
         else:
@@ -115,16 +116,18 @@ class LowBitChatglmMultiDecoderlayer(LLMBaseNNFactory):
         past_values = []
         if mode == "decode":
             for i in range(num_layers):
+                # TODO: make sure?
                 past_key = self.create_cache_op(
-                    (self.batch_size, self.num_key_value_heads, self.max_seq_len, self.head_dim)
+                    (self.max_seq_len, self.batch_size, self.num_key_value_heads, self.head_dim)
                 )
                 if transpose_value:
-                    past_value = self.create_cache_op(
-                        (self.batch_size, self.num_key_value_heads, self.head_dim, self.max_seq_len)
-                    )
+                    # past_value = self.create_cache_op(
+                    #     (self.batch_size, self.num_key_value_heads, self.head_dim, self.max_seq_len)
+                    # )
+                    warnings("transpose_value is not supported for chatglm3 now")
                 else:
                     past_value = self.create_cache_op(
-                        (self.batch_size, self.num_key_value_heads, self.max_seq_len, self.head_dim)
+                        (self.max_seq_len, self.batch_size, self.num_key_value_heads, self.head_dim)
                     )
                 past_keys.append(past_key)
                 past_values.append(past_value)
@@ -181,6 +184,116 @@ class LowBitChatglmMultiDecoderlayer(LLMBaseNNFactory):
         print("start compiling")
         self.compile()
 
+    def attention(self,
+                  *,
+                  hidden_states,
+                  position_ids,
+                  attention_mask,
+                  past_key,
+                  past_value,
+                  cos,
+                  sin,
+                  mode,
+                  num_heads,
+                  num_key_value_heads,
+                  head_dim,
+                  seq_len,
+                  qkv_bias=None):
+        hidden_size = num_heads * head_dim
+        num_key_value_groups = num_heads // num_key_value_heads
+        qkv_states = self.linear(
+            hidden_states,
+            (num_heads + 2 * num_key_value_heads)  * head_dim,
+            hidden_size,
+            bias=True,
+            wt_dtype=self.dtype,
+        )
+        if qkv_bias is not None:
+            qkv_states =  qkv_states + qkv_bias
+        
+        (query_states, key_states, value_states) = qkv_states.split(
+            [
+                num_heads * head_dim,
+                num_key_value_heads * head_dim,
+                num_key_value_heads * head_dim,
+            ],
+            dim=-1,
+        )
+
+        query_states = self.reshape(
+            query_states, [seq_len, 1, num_heads, head_dim]
+        )
+        key_states = self.reshape(
+            key_states, [seq_len, 1, num_key_value_heads, head_dim]
+        )
+        value_states = self.reshape(
+            value_states, [seq_len, 1, num_key_value_heads, head_dim]
+        )
+
+        # query_states = self.transpose(query_states, [0, 2, 1, 3])
+        # key_states = self.transpose(key_states, [0, 2, 1, 3])
+        # if self.transpose_value:
+        #     value_states = self.transpose(value_states, [0, 2, 3, 1])
+        # else:
+        #     value_states = self.transpose(value_states, [0, 2, 1, 3])
+        
+        # TODO: check
+        # query_states, key_states = self.apply_rotary_pos_emb(
+        #     q=query_states,
+        #     k=key_states,
+        #     cos=cos,
+        #     sin=sin,
+        #     position_ids=position_ids,
+        #     num_heads=num_heads,
+        #     seq_len=seq_len,
+        #     head_dim=head_dim,
+        # )
+        new_key_states = key_states
+        new_value_states = value_states
+
+        if mode == "decode":
+            key_states = self.concat(past_key, key_states, axis=0)
+            # if self.transpose_value:
+            #     value_states = self.concat(past_value, value_states, axis=-1)
+            # else:
+            value_states = self.concat(past_value, value_states, axis=0)
+            kv_seq_len = self.max_seq_len + 1
+        else:
+            kv_seq_len = seq_len
+
+        # TODO: check repeat_kv ?
+        key_states = self.repeat_kv(hidden_states=key_states,
+                                    n_rep=num_key_value_groups,
+                                    num_key_value_heads=num_key_value_heads,
+                                    kv_seq_len=kv_seq_len,
+                                    head_dim=head_dim,)
+        value_states = self.repeat_kv(hidden_states=value_states,
+                                      n_rep=num_key_value_groups,
+                                      num_key_value_heads=num_key_value_heads,
+                                      kv_seq_len=kv_seq_len,
+                                      head_dim=head_dim,
+                                      transpose=self.transpose_value)
+
+        query_layer, key_layer, value_layer = [k.permute(1, 2, 0, 3) for k in [query_layer, key_layer, value_layer]]
+
+        attn_weight = self.matmul(query_states, key_states, False, True) / (
+            math.sqrt(head_dim)
+        )
+        attn_weight = self.eltwise_add(attn_weight, attention_mask)
+        attn_weight = self.convert_to_fp32(attn_weight)
+        attn_weight = self.softmax(attn_weight, -1)
+        attn_weight = self.convert_to_fp16(attn_weight)
+        attn_output = self.matmul(attn_weight, value_states, False, self.transpose_value)
+
+        attn_output = self.transpose(attn_output, [0, 2, 1, 3])
+        attn_output = self.reshape(attn_output, [1, seq_len, hidden_size])
+
+        attn_output = self.linear(
+            attn_output, hidden_size, hidden_size, bias=False, wt_dtype=self.dtype
+        )
+
+        return attn_output, new_key_states, new_value_states
+
     def build_decoder(
         self,
         hidden_states,
@@ -193,7 +306,7 @@ class LowBitChatglmMultiDecoderlayer(LLMBaseNNFactory):
     ):
 
         residual = hidden_states
-        input_2d = self.reshape(hidden_states, (self.batch_size * self.seq_len, self.hidden_size))
+        input_2d = self.reshape(hidden_states, (self.seq_len * self.batch_size, self.hidden_size))
         input_2d = self.layer_norm(input_2d, input_layernorm_weight)
         attn_output, new_key_states, new_value_states = self.attention(
             hidden_states=input_2d,
