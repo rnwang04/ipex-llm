@@ -106,31 +106,16 @@ class LowBitLlamaMultiDecoderlayer(LLMBaseNNFactory):
 
         # Self Attention
         if mode == "decode":
-            attention_mask = self.create_input_op((self.batch_size, 1, 1, self.max_seq_len + 1))
+            attention_mask = self.create_input_op((self.batch_size, 1, 1, self.max_seq_len + 1), dtype=np.int64)
         else:
-            attention_mask = self.create_input_op((self.batch_size, 1, self.seq_len, self.seq_len))
+            attention_mask = self.create_input_op((self.batch_size, 1, self.seq_len, self.seq_len), dtype=np.int64)
+        # if mode == "decode":
+        #     attention_mask = self.create_input_op((self.batch_size, 1, 1, self.max_seq_len + 1))
+        # else:
+        #     attention_mask = self.create_input_op((self.batch_size, 1, self.seq_len, self.seq_len))
 
-        position_ids = self.create_input_op((self.batch_size, self.seq_len))
-        past_keys = []
-        past_values = []
-        if mode == "decode":
-            for i in range(num_layers):
-                past_key = self.create_cache_op(
-                    (self.batch_size, self.num_key_value_heads, self.max_seq_len, self.head_dim)
-                )
-                if transpose_value:
-                    past_value = self.create_cache_op(
-                        (self.batch_size, self.num_key_value_heads, self.head_dim, self.max_seq_len)
-                    )
-                else:
-                    past_value = self.create_cache_op(
-                        (self.batch_size, self.num_key_value_heads, self.max_seq_len, self.head_dim)
-                    )
-                past_keys.append(past_key)
-                past_values.append(past_value)
-        else:
-            past_keys = [None] * num_layers
-            past_values = [None] * num_layers
+        # position_ids = self.create_input_op((self.batch_size, self.seq_len))
+        position_ids = self.create_input_op((self.batch_size, self.seq_len), dtype=np.int64)
 
         if input_layernorm_weights is None:
             input_layernorm_weights = []
@@ -156,10 +141,33 @@ class LowBitLlamaMultiDecoderlayer(LLMBaseNNFactory):
             input_layernorm_weights = [self.constant(w) for w in input_layernorm_weights]
             post_attn_layernorm_weights = [self.constant(w) for w in post_attn_layernorm_weights]
 
+        past_keys = []
+        past_values = []
+        if mode == "decode":
+            for i in range(num_layers):
+                past_key = self.create_cache_op(
+                    (self.batch_size, self.num_key_value_heads, self.max_seq_len, self.head_dim)
+                )
+                if transpose_value:
+                    past_value = self.create_cache_op(
+                        (self.batch_size, self.num_key_value_heads, self.head_dim, self.max_seq_len)
+                    )
+                else:
+                    past_value = self.create_cache_op(
+                        (self.batch_size, self.num_key_value_heads, self.max_seq_len, self.head_dim)
+                    )
+                past_keys.append(past_key)
+                past_values.append(past_value)
+        else:
+            past_keys = [None] * num_layers
+            past_values = [None] * num_layers
+
         hidden_states = input
 
         curr_key_values = []
+        # tmp_hidden_states = []
         for i in range(num_layers):
+            # hidden_states, new_key_states, new_value_states, tmp = self.build_decoder(
             hidden_states, new_key_states, new_value_states = self.build_decoder(
                 hidden_states=hidden_states,
                 attention_mask=attention_mask,
@@ -170,6 +178,7 @@ class LowBitLlamaMultiDecoderlayer(LLMBaseNNFactory):
                 past_value=past_values[i],
             )
             curr_key_values.append((new_key_states, new_value_states))
+            # tmp_hidden_states.append(tmp)
 
         # define outputs
         hidden_states = self.convert_to_fp16(hidden_states)
@@ -177,6 +186,8 @@ class LowBitLlamaMultiDecoderlayer(LLMBaseNNFactory):
         for i in range(num_layers):
             new_key_states = self.convert_to_fp16(curr_key_values[i][0])
             new_value_states = self.convert_to_fp16(curr_key_values[i][1])
+        # for i in range(num_layers):
+        #     tmp = self.convert_to_fp16(tmp_hidden_states[i])
 
         print("start compiling")
         self.compile()
@@ -215,8 +226,10 @@ class LowBitLlamaMultiDecoderlayer(LLMBaseNNFactory):
         hidden_states = self.mlp(hidden_states)
         hidden_states = self.eltwise_add(residual, hidden_states)
         hidden_states = self.convert_to_fp16(hidden_states)
-
         return hidden_states, new_key_states, new_value_states
+
+        # tmp = hidden_states
+        # return hidden_states, new_key_states, new_value_states, tmp
 
 
 class FusedLlamaLowBitMultiDecoderlayer(torch.nn.Module):
@@ -314,13 +327,49 @@ class FusedLlamaLowBitMultiDecoderlayer(torch.nn.Module):
             position_ids,
         )
 
+        suffix = "" if position_ids.int().item() == 28 else "_2turn"
+        if self.layer_indexes[0] == 0:
+            inputs[0].numpy().tofile(rf"D:\ruonan\npu-test\test_input_output_debug\forward_input_0_hidden{suffix}.bin")
+            inputs[1].to(torch.int64).numpy().tofile(rf"D:\ruonan\npu-test\test_input_output_debug\forward_input_1{suffix}.bin")
+            inputs[2].to(torch.int64).numpy().tofile(rf"D:\ruonan\npu-test\test_input_output_debug\forward_input_2{suffix}.bin")
+
         for i in range(self.intra_stages):
             start, end = self.layer_ranges[i]
             self.backend_decoders[i].update_cache(past_key_value, self.layer_indexes[start:end])
+            for j in range(start, end):
+                key_ = past_key_value.key_cache[self.layer_indexes[j]] # shape is [1, 32, 28, 128]
+                val_ = past_key_value.value_cache[self.layer_indexes[j]]
+                new_size = (
+                    key_.size(0),
+                    key_.size(1),
+                    self.max_seq_len,
+                    key_.size(3),
+                )
+                key = key_.as_strided(new_size, key_.stride(), storage_offset=0)
+                val = val_.as_strided(new_size, val_.stride(), storage_offset=0)
+                print("save key value of ", self.layer_indexes[j])
+                print("shape and stride of key_ is ", key_.shape, key_.stride)
+                print("shape and stride of key is ", key.shape, key.stride)
+                assert key_.equal(key[:, :, :key_.shape[2], :])
+                key.numpy().tofile(rf"D:\ruonan\npu-test\test_input_output_debug\forward_input_key_{self.layer_indexes[j]}{suffix}.bin")
+                val.numpy().tofile(rf"D:\ruonan\npu-test\test_input_output_debug\forward_input_value_{self.layer_indexes[j]}{suffix}.bin")
+
+        # hidden_states, new_keys, new_values, tmp_hiddens = LowBitLlamaMultiDecoderlayer.run_decoders(
+        #     tuple(inputs),
+        #     decoders=self.backend_decoders)
 
         hidden_states, new_keys, new_values = LowBitLlamaMultiDecoderlayer.run_decoders(
-            inputs,
+            tuple(inputs),
             decoders=self.backend_decoders)
+
+        print(self.layer_indexes[0], self.layer_indexes[-1])
+        # for idx, (k, v, h) in enumerate(zip(new_keys, new_values, tmp_hiddens)):
+        #     k.numpy().tofile(rf"D:\ruonan\npu-test\test_input_output_debug\forward_output_key_{self.layer_indexes[idx]}.bin")
+        #     v.numpy().tofile(rf"D:\ruonan\npu-test\test_input_output_debug\forward_output_value_{self.layer_indexes[idx]}.bin")
+        #     h.numpy().tofile(rf"D:\ruonan\npu-test\test_input_output_debug\forward_output_hidden_{self.layer_indexes[idx]}.bin")
+        for idx, (k, v) in enumerate(zip(new_keys, new_values)):
+            k.numpy().tofile(rf"D:\ruonan\npu-test\test_input_output_debug\forward_output_key_{self.layer_indexes[idx]}{suffix}.bin")
+            v.numpy().tofile(rf"D:\ruonan\npu-test\test_input_output_debug\forward_output_value_{self.layer_indexes[idx]}{suffix}.bin")
 
         if self.do_print:
             print("outputs:", hidden_states)
@@ -419,7 +468,8 @@ class FusedLlamaLowBitDecoderlayer(torch.nn.Module):
         seq_len = hidden_states.shape[1]
 
         backend_cls = self.backend_cls_prefill
-        inputs = (hidden_states.to(torch.float16), attention_mask, position_ids)
+        # inputs = (hidden_states.to(torch.float16), attention_mask, position_ids)
+        inputs = (hidden_states.to(torch.float16), attention_mask.to(torch.int64), position_ids.to(torch.int64))
         inputs += (self.layer_norm_0, self.layer_norm_1)
         hidden_states, past_key, past_value = run_model(
             inputs, self.op_parameters, backend_cls, self.op_id, replica=2
@@ -531,7 +581,8 @@ def run_decode(
                 past_key_values = input_queue.get()
             else:
                 past_seen_tokens = past_key_values.get_seq_length()
-                attention_mask = torch.ones([1, past_seen_tokens + 1], dtype=torch.int64)
+                # attention_mask = torch.ones([1, past_seen_tokens + 1], dtype=torch.int64)
+                attention_mask = torch.ones([1, past_seen_tokens], dtype=torch.int64)
                 cache_position = torch.arange(
                     past_seen_tokens, past_seen_tokens + 1, device=hidden_states.device
                 )
@@ -544,9 +595,10 @@ def run_decode(
 
                 pad_mask = (0, pad_len)
                 padded_causal_mask = F.pad(
-                    causal_mask.to(torch.float16), pad_mask, value=torch.finfo(torch.float16).min
+                    # causal_mask.to(torch.float16), pad_mask, value=torch.finfo(torch.float16).min
+                    causal_mask.to(torch.int64), pad_mask, value=torch.iinfo(torch.int64).min
                 )
-                padded_causal_mask[:, :, :, -1] = 0.0
+                padded_causal_mask[:, :, :, -1] = 0
                 dist.recv(hidden_states, src=rank - 1)
                 layer_outputs = multi_decoder(
                     hidden_states,
@@ -796,10 +848,18 @@ class PrefillRunner:
         hidden_states = F.pad(hidden_states.to(torch.float16), (0, 0, 0, pad_len), value=0.0)
         position_ids = F.pad(position_ids, (0, pad_len), value=0)
         attention_mask = F.pad(
-            attention_mask.to(torch.float16),
+            attention_mask.to(torch.int64),
             (0, pad_len, 0, pad_len),
-            value=torch.finfo(torch.float16).min,
+            value=torch.iinfo(torch.int64).min,
         )
+
+        # print("len of prefill hidden states: ", seq_len)
+        # print("attention mask is :", attention_mask)
+        # attention_mask = F.pad(
+        #     attention_mask.to(torch.float16),
+        #     (0, pad_len, 0, pad_len),
+        #     value=torch.finfo(torch.float16).min,
+        # )
 
         args = (hidden_states, position_ids, attention_mask, past_key_value, cache_position)
         self.prefill_input_queue.put(args)
@@ -853,6 +913,12 @@ def gen_llama_fused_model_forward(prefill_runner, decode_runner):
 
         if self.gradient_checkpointing and self.training and use_cache:
             use_cache = False
+
+        if input_ids.shape[1] == 1:
+            suffix = "" if input_ids.int().item() == 29871 else "_2turn"
+            input_ids.int().numpy().tofile(rf"D:\ruonan\npu-test\test_input_output_debug\forward_input_0{suffix}.bin")
+            print("[DEBUG]")
+        print(input_ids.shape, input_ids)
 
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
@@ -981,7 +1047,14 @@ def llama2_casullm_forward(
         logits = torch.cat(logits, dim=-1)
     else:
         logits = self.lm_head(hidden_states)
+
+    if input_ids.shape[1] == 1:
+        suffix = "" if input_ids.int().item() == 29871 else "_2turn"
+        logits.numpy().tofile(rf"D:\ruonan\npu-test\test_input_output_debug\forward_output_0_fp16{suffix}.bin")
     logits = logits.float()
+    if input_ids.shape[1] == 1:
+        suffix = "" if input_ids.int().item() == 29871 else "_2turn"
+        logits.numpy().tofile(rf"D:\ruonan\npu-test\test_input_output_debug\forward_output_0_fp32{suffix}.bin")
 
     loss = None
     if labels is not None:
