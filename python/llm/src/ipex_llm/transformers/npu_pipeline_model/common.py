@@ -53,7 +53,9 @@ def update_names_of_IR_and_export_blob(model, model_name, dir):
             f.write(model_stream)
 
     os.remove(xml_path)
-    os.remove(new_ir_path)
+    # os.remove(new_ir_path)
+    # os.remove(bin_path)
+    # os.remove(new_bin_path)
 
     return blob_path
 
@@ -121,6 +123,7 @@ class LLMEmbedding(NNFactory):
         vocab_size,
         embedding_dim,
         embedding_weight,
+        input_length,
         padding_idx,
         dtype,  # fp16
         device: str = "NPU",
@@ -133,7 +136,7 @@ class LLMEmbedding(NNFactory):
 
         # define input
         weight = self.constant(embedding_weight)
-        input = self.parameter((1, 1), dtype=np.int32)
+        input = self.parameter((1, input_length), dtype=np.int32)
 
         if padding_idx == -1:
             padding_idx += vocab_size
