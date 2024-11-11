@@ -327,7 +327,7 @@ def convert_llm(model: torch.nn.Module,
     elif model.config.model_type == "qwen2":
         layernorm_const = os.environ.get("IPEX_LLM_LAYERNORM_CONST", "0") == "1"
         with tempfile.TemporaryDirectory() as temp_dir:
-            temp_dir = "D:\\ruonan\\qwen2.5-full-weights"
+            temp_dir = "D:\\ruonan\\qwen2.5-full-weights-960"
             if os.path.exists(temp_dir):
                 shutil.rmtree(temp_dir)
             os.mkdir(temp_dir)
@@ -357,9 +357,9 @@ def convert_llm(model: torch.nn.Module,
             if compile_full_model:
                 from .qwen import convert_qwen_prefill_layer, convert_lm_head_and_embedding
                 convert_qwen_prefill_layer(model, n_splits_linear, n_splits_down_proj,
-                                           temp_dir, weight_dir, transpose_value_cache, kv_len, group_size)
+                                           temp_dir, weight_dir, transpose_value_cache, max_prompt_len, group_size)
                 convert_lm_head_and_embedding(model, n_splits_linear,
-                                              temp_dir, weight_dir, kv_len)
+                                              temp_dir, weight_dir, max_prompt_len)
 
             # patch attrs for generate
             model.kv_len = kv_len

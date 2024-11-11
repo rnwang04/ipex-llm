@@ -54,8 +54,6 @@ def update_names_of_IR_and_export_blob(model, model_name, dir):
 
     os.remove(xml_path)
     # os.remove(new_ir_path)
-    # os.remove(bin_path)
-    # os.remove(new_bin_path)
 
     return blob_path
 

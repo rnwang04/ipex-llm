@@ -57,7 +57,7 @@ def convert_lm_head_and_embedding(model, n_splits_linear, temp_dir, weight_dir, 
         vocab_size=vocab_size,
         n_splits=n_splits_linear
     )
-    suffix = "_prefil" if input_length > 1 else ""
+    suffix = "_prefill" if input_length > 1 else ""
     last_blob_path = update_names_of_IR_and_export_blob(new_lm_head, f"lm_head{suffix}", temp_dir)
 
     # save weights bins files
