@@ -180,10 +180,10 @@ class _BaseAutoModelClass:
 
             if optimize_model:
                 invalidInputError(
-                    max_prompt_len < max_context_len,
+                    max_prompt_len <= max_context_len,
                     (
                         f"max_prompt_len ({max_prompt_len}) should be less"
-                        " than max_context_len ({max_context_len})"
+                        f" than max_context_len ({max_context_len + 1})"
                     ),
                 )
                 optimize_kwargs = {
